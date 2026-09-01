@@ -1,0 +1,17 @@
+{
+  "name": "Six Threads",
+  "short_name": "Six Threads",
+  "description": "A personal operating system: exercise, eating, work, dog training, money and hobbies against one schedule.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#101410",
+  "theme_color": "#101410",
+  "categories": ["productivity", "lifestyle"],
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icon-maskable.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
