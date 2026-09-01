@@ -2366,7 +2366,9 @@ function gridCol(d, o){
   const ghosts = o.ghosts ? (S.proposal || []).filter(x => x.d === d).map(x => ({ id:x.id, title:x.title, area:x.area, time:x.time, dur:x.dur, ghost:true })) : [];
   const items = packDay((D.sched || []).filter(b => gm(b.time) >= 0).concat(ghosts));
   const nowM = new Date().getHours() * 60 + new Date().getMinutes();
+  const wk = (typeof workIv === 'function') ? workIv(d) : null;
   return `<div class="gcol" data-gday="${d}">
+    ${wk ? `<div class="gwork" style="top:${Math.max(0,(wk[0]-DAY_START)*PXM)}px;height:${Math.max(0,(Math.min(wk[1],DAY_END)-Math.max(wk[0],DAY_START))*PXM)}px"></div>` : ''}
     ${o.now && nowM >= DAY_START && nowM <= DAY_END ? `<div class="gnow" id="nowline" style="top:${(nowM - DAY_START) * PXM}px"></div>` : ''}
     ${items.map(it => {
       const b = it.b;
@@ -3377,7 +3379,36 @@ setInterval(() => {
    ============================================================ */
 const WINDOWS = { any:[DAY_START, DAY_END], morning:[DAY_START, 12*60], afternoon:[12*60, 17*60], evening:[17*60, DAY_END] };
 const WINLABEL = { any:'any time', morning:'mornings', afternoon:'afternoons', evening:'evenings' };
-const rules = () => Object.assign({ start:'07:00', end:'20:00', lunchOn:true, lunchFrom:'12:30', lunchMins:60, buffer:15, off:[0] }, S.ref.schedule.rules || {});
+const rules = () => Object.assign({ start:'07:00', end:'20:00', lunchOn:true, lunchFrom:'12:30', lunchMins:60, buffer:15, off:[0],
+  workOn:true, workStart:'08:00', workEnd:'16:00', workDays:[1,2,3,4,5],
+  deepOn:true, deepPerDay:2, deepMins:90 }, S.ref.schedule.rules || {});
+const isWorkDay = d => { const R = rules(); return R.workOn && (R.workDays || []).includes(toD(d).getDay()); };
+/* the working day as an interval, or null on a day you don't work */
+function workIv(d){ const R = rules(); return isWorkDay(d) ? [gm(R.workStart), gm(R.workEnd)] : null; }
+/* subtract one interval from a list of them */
+function cutIv(list, cut){
+  if (!cut) return list;
+  const out = [];
+  list.forEach(iv => { if (cut[1] <= iv[0] || cut[0] >= iv[1]) { out.push(iv); return; }
+    if (cut[0] > iv[0]) out.push([iv[0], cut[0]]);
+    if (cut[1] < iv[1]) out.push([cut[1], iv[1]]); });
+  return out;
+}
+function clipIv(list, keep){
+  if (!keep) return list;
+  return list.map(iv => [Math.max(iv[0], keep[0]), Math.min(iv[1], keep[1])]).filter(iv => iv[1] > iv[0]);
+}
+/* where a commitment is allowed to land on a given day.
+   Work things go inside working hours; everything else stays out of them,
+   unless you tick the box that says it may sit in the working day. */
+function windowsFor(w, d){
+  const base = WINDOWS[w.when] || WINDOWS.any;
+  let out = [[base[0], base[1]]];
+  const wk = workIv(d);
+  if (wk) out = (w.area === 'work' && !w.outWork) ? clipIv(out, wk)
+            : (w.inWork ? out : cutIv(out, wk));
+  return out.filter(iv => iv[1] > iv[0]);
+}
 
 function mergeIv(iv){
   const a = iv.filter(x => x[1] > x[0]).sort((p,q) => p[0]-q[0]); const out = [];
@@ -3418,18 +3449,23 @@ function energyByWeekday(){
 }
 
 function bestSlot(days, w, allPlaced, mine, eDay){
-  const win = WINDOWS[w.when] || WINDOWS.any;
   const mins = Math.max(15, num(w.mins) || 45);
+  const cap = Math.max(1, num(w.perDay) || 1);
   let best = null;
   days.forEach(d => {
     if (d < todayISO()) return;
     const dow = toD(d).getDay();
     if ((w.days || []).length && !w.days.includes(dow)) return;
+    const wins = windowsFor(w, d);
+    if (!wins.length) return;
+    /* the daily cap is a rule, not a tiebreak: a third deep-work block on a
+       Wednesday is not a slightly worse answer, it is the wrong answer */
+    if (mine.filter(m => m.d === d).length >= cap) return;
     /* the real commitments on this day — the things worth sitting next to */
     const anchors = (dayRO(d).sched || []).filter(b => gm(b.time) >= 0)
       .map(b => [gm(b.time), gm(b.time) + Math.max(15, num(b.dur) || 30)])
       .concat(allPlaced.filter(x => x.d === d).map(x => [gm(x.time), gm(x.time) + num(x.dur)]));
-    gapsFor(d, allPlaced).forEach(g => {
+    gapsFor(d, allPlaced).forEach(g => { wins.forEach(win => {
       const lo = Math.max(g[0], win[0]), hi = Math.min(g[1], win[1]);
       if (hi - lo < mins) return;
       const gapLen = g[1] - g[0];
@@ -3443,9 +3479,10 @@ function bestSlot(days, w, allPlaced, mine, eDay){
         const buf = num(rules().buffer);
         const touches = anchors.some(a => Math.abs(t - (a[1] + buf)) <= 15 || Math.abs((t + mins + buf) - a[0]) <= 15);
         if (touches) { score += 22; why.push('sits right against what you already have on'); }
-        /* 2. spacing — one a day at most, and as far from siblings as we can get */
-        const sameDay = mine.some(m => m.d === d);
-        if (sameDay) score -= 70;
+        /* 2. spacing — as far from siblings as we can get (the daily cap is
+              enforced above, as a rule rather than a preference) */
+        const sameDay = mine.filter(m => m.d === d).length;
+        if (sameDay) score -= 6;
         const dist = mine.length ? Math.min(...mine.map(m => Math.abs((toD(d) - toD(m.d)) / 86400000))) : 3;
         score += Math.min(dist, 3) * 14;
         if (mine.length && dist >= 2) why.push('well spaced from the others');
@@ -3458,9 +3495,13 @@ function bestSlot(days, w, allPlaced, mine, eDay){
         if (!best || score > best.score) best = { score, d, time: gt(t), dur: mins,
           title: w.title, area: w.area, why, gapLen, id: 'p' + uid() };
       }
-    });
+    }); });
   });
-  if (best) { best.why = (best.why.length ? best.why : ['the best free slot in your ' + WINLABEL[w.when || 'any']]).slice(0,2).join(', '); }
+  if (best) {
+    if (w.area === 'work' && workIv(best.d) && !best.why.length) best.why.push('inside your working day');
+    const fallback = (w.when && w.when !== 'any') ? 'the best free slot in your ' + WINLABEL[w.when] : 'the best free slot left';
+    best.why = (best.why.length ? best.why : [fallback]).slice(0,2).join(', ');
+  }
   return best;
 }
 
@@ -3479,19 +3520,86 @@ function alreadyThisWeek(days, w){
   return out;
 }
 
+/* ---------- commitments with a time of their own ----------
+   Riding is Tuesday at five. That is not a preference the scheduler gets to
+   weigh against a tidier gap — it is a fact about the week. So a commitment
+   with a set time is placed at that time on its days, and if something is
+   already there we say so rather than quietly moving your riding. */
+function whatClashes(d, t, mins){
+  const buf = num(rules().buffer), hit = [];
+  (dayRO(d).sched || []).forEach(b => { const st = gm(b.time); if (st < 0) return;
+    const en = st + Math.max(15, num(b.dur) || 30);
+    if (t < en + buf && st < t + mins + buf) hit.push(b.title || 'something'); });
+  const R = rules();
+  if ((R.off || []).includes(toD(d).getDay())) hit.push('a day you keep clear');
+  else if (t < gm(R.start) || t + mins > gm(R.end)) hit.push('outside the hours you allow');
+  return hit;
+}
+function fixedSlots(days, w, have){
+  const at = gm(w.at); if (at < 0) return [];
+  const mins = Math.max(15, num(w.mins) || 45);
+  const want = Math.max(0, num(w.perWeek) - have.length);
+  const out = [];
+  days.forEach(d => {
+    if (out.length >= want || d < todayISO()) return;
+    if ((w.days || []).length && !w.days.includes(toD(d).getDay())) return;
+    if (have.some(h => h.d === d)) return;
+    const clash = whatClashes(d, at, mins);
+    out.push({ d, time: w.at, dur: mins, title: w.title, area: w.area, wantId: w.id,
+      fixed: true, clash: clash.length ? clash.slice(0,2).join(' and ') : null,
+      why: clash.length ? 'your set time, but ' + clash.slice(0,2).join(' and ') + ' is already there'
+                        : 'your set time for this', id: 'p' + uid() });
+  });
+  return out;
+}
+/* deep work is a ground rule, not something you should have to remember to ask
+   for: if you work an 8-hour day, the app assumes you want protected focus
+   inside it and offers it unprompted. Skip it if you've written your own. */
+function deepWant(days){
+  const R = rules();
+  if (!R.deepOn || !R.workOn) return null;
+  const own = (S.ref.schedule.wants || []).some(w => w.active !== false && num(w.perWeek) > 0
+    && /deep\s*work|focus/i.test(String(w.title || '')));
+  if (own) return null;
+  /* only the working days still ahead of us — asking for a full week's focus
+     on a Thursday afternoon would just produce blocks nobody can keep */
+  const dws = days ? days.filter(d => d >= todayISO() && (R.workDays || []).includes(toD(d).getDay())).length
+                   : (R.workDays || []).length;
+  if (!dws) return null;
+  return { id: 'deep', title: 'Deep work', area: 'work', builtin: true,
+    perWeek: dws * Math.max(1, num(R.deepPerDay)), perDay: Math.max(1, num(R.deepPerDay)),
+    mins: Math.max(30, num(R.deepMins)), when: 'any', days: (R.workDays || []).slice(), active: true };
+}
+function planWants(days){
+  const ws = (S.ref.schedule.wants || []).filter(w => w.active !== false && num(w.perWeek) > 0);
+  const dw = deepWant(days);
+  return dw ? [dw, ...ws] : ws;
+}
 function proposePlan(days){
-  const wants = (S.ref.schedule.wants || []).filter(w => w.active !== false && num(w.perWeek) > 0);
+  const wants = planWants(days);
   const eDay = energyByWeekday();
   const placed = [], failed = [];
-  /* longest first: the hardest things to fit get first pick of the gaps */
-  [...wants].sort((a,b) => num(b.mins) - num(a.mins) || num(b.perWeek) - num(a.perWeek)).forEach(w => {
+  /* set times first — they have no choice about where they go, so everything
+     else should be fitted around them rather than the other way round */
+  const ordered = [...wants].sort((a,b) => (gm(b.at) >= 0) - (gm(a.at) >= 0)
+    || num(b.mins) - num(a.mins) || num(b.perWeek) - num(a.perWeek));
+  ordered.forEach(w => {
     const have = alreadyThisWeek(days, w);
     const need = Math.max(0, num(w.perWeek) - have.length);
+    if (!need) return;
+    if (gm(w.at) >= 0) {
+      const fx = fixedSlots(days, w, have);
+      fx.forEach(x => placed.push(x));
+      if (fx.length < need) failed.push({ title: w.title, short: need - fx.length, of: num(w.perWeek),
+        mins: num(w.mins), when: w.when, fixed: true });
+      return;
+    }
     const mine = have.slice();
     for (let i = 0; i < need; i++) {
       const slot = bestSlot(days, w, placed, mine, eDay);
-      if (!slot) { failed.push({ title: w.title, short: need - i, of: num(w.perWeek), mins: num(w.mins), when: w.when }); break; }
-      slot.wantId = w.id; placed.push(slot); mine.push(slot);
+      if (!slot) { failed.push({ title: w.title, short: need - i, of: num(w.perWeek), mins: num(w.mins), when: w.when,
+        inWorkDay: w.area === 'work' }); break; }
+      slot.wantId = w.id; slot.builtin = w.builtin; placed.push(slot); mine.push(slot);
     }
   });
   return { placed, failed };
@@ -3500,7 +3608,7 @@ function proposePlan(days){
 /* ---------- the screen ---------- */
 /* how much of what you said you wanted is still unplaced this week */
 function planGap(days){
-  const ws = (S.ref.schedule.wants || []).filter(w => w.active !== false && num(w.perWeek) > 0);
+  const ws = planWants(days);
   let short = 0;
   ws.forEach(w => { short += Math.max(0, num(w.perWeek) - alreadyThisWeek(days, w).length); });
   return { wants: ws.length, short };
@@ -3520,16 +3628,17 @@ function maybeAutoPropose(days, k){
 function weekAuto(days, k, W){
   maybeAutoPropose(days, k);
   const ws = S.ref.schedule.wants || [], R = rules();
+  const dw = deepWant(days);
   const P = S.proposal || [], F = S.proposeFailed || [];
   const future = days.filter(d => d >= todayISO());
   const autoOn = future.reduce((a,d) => a + (dayRO(d).sched||[]).filter(b => b.auto).length, 0);
   const freeMins = future.reduce((a,d) => a + gapsFor(d, []).reduce((x,g) => x + Math.max(0, g[1]-g[0]), 0), 0);
-  const needMins = ws.filter(w => w.active !== false).reduce((a,w) => a + num(w.perWeek) * num(w.mins), 0);
+  const needMins = planWants(days).reduce((a,w) => a + num(w.perWeek) * num(w.mins), 0);
 
   return `<div class="card" style="margin-bottom:16px">
       <div class="spread" style="align-items:flex-start">
         <div><h3>Plan the rest of the week for me</h3>
-          <div class="note" style="margin-bottom:0;max-width:62ch">Everything already on your timetable is treated as fixed and never moved. The scheduler only fills what's genuinely free — after your ground rules take their cut — and it shows you the plan before anything is written.</div></div>
+          <div class="note" style="margin-bottom:0;max-width:62ch">Everything already on your timetable is treated as fixed and never moved. The scheduler only fills what's genuinely free — after your ground rules take their cut — and it shows you the plan before anything is written. ${R.workOn ? 'Your working day is kept for work: deep work goes inside it, everything else around it.' : ''} You can move any suggestion before accepting, and drag anything afterwards.</div></div>
         <div class="row">
           ${autoOn ? `<button class="btn ghost sm" data-act="clearauto">Remove ${autoOn} auto block${autoOn===1?'':'s'}</button>` : ''}
           <button class="btn" data-act="propose">${P.length ? 'Suggest again' : 'Suggest a plan'}</button></div>
@@ -3537,6 +3646,8 @@ function weekAuto(days, k, W){
       <hr class="rule">
       <div class="row" style="gap:16px">
         <span class="pill">${future.length} day${future.length===1?'':'s'} left this week</span>
+        ${R.workOn ? `<span class="pill" style="--c:var(--a-work)">work ${esc(R.workStart)}–${esc(R.workEnd)}, ${(R.workDays||[]).length} day${(R.workDays||[]).length===1?'':'s'}</span>` : ''}
+        ${dw ? `<span class="pill" style="--c:var(--a-work)">${dw.perDay}×${dw.mins} min deep work a day</span>` : ''}
         <span class="pill">${(freeMins/60).toFixed(1)} h genuinely free</span>
         <span class="pill" style="${needMins > freeMins ? 'border-color:var(--warn);color:var(--warn)' : ''}">${(needMins/60).toFixed(1)} h of commitments to place</span>
         ${autoOn ? `<span class="pill">${autoOn} already auto-scheduled</span>` : ''}
@@ -3552,10 +3663,12 @@ function weekAuto(days, k, W){
           ${P.length ? `<button class="btn" data-act="propaccept">Accept ${P.length}</button>` : ''}</div>
       </div>
       ${P.slice().sort((a,b) => (a.d+a.time).localeCompare(b.d+b.time)).map(x => `
-        <div class="item">
+        <div class="item"${x.clash ? ' style="background:var(--a-food-bg)"' : ''}>
           <span class="pip" style="--c:${threadC(x.area)};width:9px;height:9px;margin-top:6px"></span>
-          <div class="body"><div class="spread"><div class="t">${esc(x.title)}</div>
-            <span class="mono tiny dim">${esc(fmtDay(x.d))} · ${esc(x.time)}–${esc(gt(gm(x.time)+x.dur))}</span></div>
+          <div class="body"><div class="spread"><div class="t">${esc(x.title)}
+              ${x.fixed ? '<span class="tiny dim" style="font-weight:500">· set time</span>' : ''}
+              ${x.clash ? '<span class="tiny" style="color:var(--warn);font-weight:700">· clashes</span>' : ''}</div>
+            <button class="chip sm" data-act="propmove" data-id="${x.id}" title="Move this one">${esc(fmtDay(x.d))} · ${esc(x.time)}–${esc(gt(gm(x.time)+x.dur))}</button></div>
             <div class="why">${esc(x.why)}</div></div>
           <button class="x" data-act="propdrop" data-id="${x.id}">&times;</button></div>`).join('')}
       ${F.length ? `<hr class="rule"><div class="lbl" style="margin-bottom:7px">Couldn't fit</div>
@@ -3609,13 +3722,26 @@ function weekAuto(days, k, W){
 Object.assign(ACT, {
   propose(){
     const days = weekDays(S.date);
-    if (!(S.ref.schedule.wants||[]).filter(w => w.active !== false).length) { toast('Add a commitment first — or use the starter set.'); return; }
+    if (!planWants(weekDays(S.date)).length) { toast('Add a commitment first — or use the starter set.'); return; }
     const r = proposePlan(days);
     S.proposal = r.placed; S.proposeFailed = r.failed; S.autoOffered = false; S.autoProposedFor = weekKey(S.date);
     render();
     toast(r.placed.length ? 'Found room for ' + r.placed.length + ' block' + (r.placed.length===1?'':'s') + '.' : 'Nothing fits — check your ground rules.');
   },
   propdrop(e, el){ S.proposal = (S.proposal||[]).filter(x => x.id !== el.dataset.id); render(); },
+  /* a proposal is a suggestion, not a verdict — move any of them before you
+     accept, and once accepted every block drags on the grid like any other */
+  propmove(e, el){ const x = (S.proposal||[]).find(y => y.id === el.dataset.id); if (!x) return;
+    openForm('Move “' + x.title + '”', [
+      {k:'d', label:'Day', type:'date', val:x.d},
+      {k:'time', label:'Start', type:'time', val:x.time},
+      {k:'dur', label:'Minutes', type:'num', val:x.dur}
+    ], v => { if (!v.d || gm(v.time) < 0) return;
+      Object.assign(x, { d:v.d, time:v.time, dur:Math.max(15, num(v.dur)||x.dur), moved:true });
+      const c = whatClashes(x.d, gm(x.time), x.dur);
+      x.clash = c.length ? c.slice(0,2).join(' and ') : null;
+      x.why = x.clash ? 'you moved it here, but ' + x.clash + ' is already there' : 'you moved it here';
+      render(); }); },
   propclear(){ S.proposal = []; S.proposeFailed = []; S.autoOffered = false; render(); },
   propaccept(){
     const P = S.proposal || []; if (!P.length) return;
@@ -3634,20 +3760,24 @@ Object.assign(ACT, {
     render(); toast('Removed ' + n + ' auto-scheduled block' + (n===1?'':'s') + '.'); },
   wantseed(){
     const seed = [
-      { title:'Workout',            area:'move', perWeek:4, mins:60, when:'morning', matchThread:true },
-      { title:'Deep work',          area:'work', perWeek:4, mins:90, when:'morning' },
-      { title:'Hobby practice',     area:'play', perWeek:3, mins:45, when:'evening' },
-      { title:'Admin & invoicing',  area:'dog',  perWeek:1, mins:45, when:'afternoon' }
+      { title:'Pilates',            area:'move', perWeek:2, mins:45, when:'morning', at:'07:15', days:[1,3] },
+      { title:'Horse riding',       area:'play', perWeek:1, mins:90, when:'evening',  at:'17:00', days:[2] },
+      { title:'Dog walk',           area:'move', perWeek:4, mins:45, when:'evening' },
+      { title:'Admin & invoicing',  area:'dog',  perWeek:1, mins:45, when:'evening' }
     ];
-    seed.forEach(x => refList('schedule','wants').push(Object.assign({ id:uid(), active:true, days:[] }, x)));
-    saveRef('schedule'); render(); toast('Four to start from — edit them to match your actual week.'); },
+    seed.forEach(x => refList('schedule','wants').push(Object.assign({ id:uid(), active:true, days:[], perDay:1 }, x)));
+    saveRef('schedule'); render();
+    toast('Four to start from — two with set times. Deep work is already a ground rule.'); },
   'want+'(){ openForm('Add a weekly commitment', [
       {k:'title', label:'What', ph:'Workout, deep work, whip practice…'},
       {k:'area', label:'Thread', type:'select', opts:threadOpts(), val:'move'},
       {k:'perWeek', label:'Times a week', type:'num', val:3},
       {k:'mins', label:'Minutes each', type:'num', val:60},
-      {k:'when', label:'Preferred part of the day', type:'select', opts:[['any','Any time'],['morning','Mornings'],['afternoon','Afternoons'],['evening','Evenings']], val:'any'},
+      {k:'at', label:'At a set time — e.g. riding, pilates (leave blank to let it find room)', type:'time', val:''},
+      {k:'when', label:'Otherwise, preferred part of the day', type:'select', opts:[['any','Any time'],['morning','Mornings'],['afternoon','Afternoons'],['evening','Evenings']], val:'any'},
       {k:'days', label:'Only on these days (leave blank for any)', type:'dow', val:[]},
+      {k:'perDay', label:'Most in one day', type:'num', val:1},
+      {k:'inWork', label:'May sit inside your working day', type:'check', val:false},
       {k:'matchThread', label:'Count anything in this thread toward it', type:'check', val:false}
     ], v => { if (!v.title) return; refList('schedule','wants').push(Object.assign({id:uid(), active:true}, v)); saveRef('schedule'); render(); }); },
   wantedit(e, el){ const w = (S.ref.schedule.wants||[]).find(x => x.id === el.dataset.id); if (!w) return;
@@ -3656,8 +3786,11 @@ Object.assign(ACT, {
       {k:'area', label:'Thread', type:'select', opts:threadOpts(), val:w.area},
       {k:'perWeek', label:'Times a week', type:'num', val:w.perWeek},
       {k:'mins', label:'Minutes each', type:'num', val:w.mins},
-      {k:'when', label:'Preferred part of the day', type:'select', opts:[['any','Any time'],['morning','Mornings'],['afternoon','Afternoons'],['evening','Evenings']], val:w.when},
+      {k:'at', label:'At a set time (leave blank to let it find room)', type:'time', val:w.at||''},
+      {k:'when', label:'Otherwise, preferred part of the day', type:'select', opts:[['any','Any time'],['morning','Mornings'],['afternoon','Afternoons'],['evening','Evenings']], val:w.when},
       {k:'days', label:'Only on these days (leave blank for any)', type:'dow', val:w.days||[]},
+      {k:'perDay', label:'Most in one day', type:'num', val:num(w.perDay)||1},
+      {k:'inWork', label:'May sit inside your working day', type:'check', val:!!w.inWork},
       {k:'matchThread', label:'Count anything in this thread toward it', type:'check', val:!!w.matchThread},
       {k:'active', label:'Include when planning', type:'check', val:w.active !== false}
     ], v => { Object.assign(w, v); saveRef('schedule'); render(); }); },
@@ -3670,7 +3803,14 @@ Object.assign(ACT, {
       {k:'lunchFrom', label:'Lunch starts', type:'time', val:R.lunchFrom},
       {k:'lunchMins', label:'Lunch minutes', type:'num', val:R.lunchMins},
       {k:'buffer', label:'Buffer around anything booked (min)', type:'num', val:R.buffer},
-      {k:'off', label:'Days to leave completely alone', type:'dow', val:R.off||[]}
+      {k:'off', label:'Days to leave completely alone', type:'dow', val:R.off||[]},
+      {k:'workOn', label:'I have a working day — keep it for work', type:'check', val:R.workOn},
+      {k:'workStart', label:'Work starts', type:'time', val:R.workStart},
+      {k:'workEnd', label:'Work ends', type:'time', val:R.workEnd},
+      {k:'workDays', label:'Working days', type:'dow', val:R.workDays||[]},
+      {k:'deepOn', label:'Offer deep work inside the working day', type:'check', val:R.deepOn},
+      {k:'deepPerDay', label:'Deep work blocks a day', type:'num', val:R.deepPerDay},
+      {k:'deepMins', label:'Minutes each', type:'num', val:R.deepMins}
     ], v => { S.ref.schedule.rules = Object.assign(rules(), v); saveRef('schedule'); render(); }); }
 });
 </script>
@@ -3683,6 +3823,7 @@ Object.assign(ACT, {
 .warn{background:var(--a-food-bg);border:1px solid var(--warn);border-radius:8px;padding:11px 13px;font-size:12.5px;line-height:1.5;color:var(--ink-2)}
 .lockbadge{display:inline-flex;align-items:center;gap:6px;font-size:11.5px;font-weight:700;color:var(--warn)}
 .lockpanel{border:1px dashed var(--line-2);border-radius:9px;padding:18px;text-align:center;color:var(--muted);font-size:13.5px}
+.gwork{position:absolute;left:0;right:0;background:var(--a-work-bg);opacity:.5;pointer-events:none;z-index:0}
 .nutgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(88px,1fr));gap:10px}
 .nutcell{background:var(--raise);border:1px solid var(--line);border-radius:8px;padding:8px 10px}
 .nutcell .k{font-size:9.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--faint);font-weight:700}
@@ -3972,7 +4113,7 @@ function analyse(ingredients){
    passphrase itself is stored nowhere. There is no reset: that
    is what makes it real rather than theatre.
    ============================================================ */
-const APP_VERSION = 'v9 · 1 Sep 2026';
+const APP_VERSION = 'v10 · 1 Sep 2026';
 const SEC = { avail: !!(window.crypto && window.crypto.subtle), on:false, locked:false,
               key:null, skipped:false, salt:null, iter:250000, timeout:15, lastAct:Date.now() };
 

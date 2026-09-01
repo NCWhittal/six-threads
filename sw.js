@@ -6,7 +6,7 @@
    The app page itself is fetched from the network FIRST, so an updated
    version appears the next time you open it rather than a reload or two
    later. The cached copy is the fallback when there's no connection. */
-const CACHE = 'six-threads-v9';
+const CACHE = 'six-threads-v10';
 const SHELL = ['./', './index.html', './manifest.webmanifest', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', e => {
